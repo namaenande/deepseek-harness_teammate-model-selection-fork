@@ -1,4 +1,4 @@
-# DeepSeek Harness
+# DeepSeek Harness — teammate model-selection fork
 
 English | [中文](README.zh.md)
 
@@ -7,6 +7,24 @@ DeepSeek Harness (`dsh`) is an open-source agent harness developed by [DeepSeek 
 It is built on an **everything-is-a-plugin** architecture and powered by [Cordis](https://github.com/cordiverse/cordis), whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512).
 
 Documentation: [https://deepseek-harness.github.io/deepseek-harness/](https://deepseek-harness.github.io/deepseek-harness/)
+
+## This fork
+
+This repository is a personal fork of [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness), maintained at [namaenande/deepseek-harness](https://github.com/namaenande/deepseek-harness). It tracks upstream and carries one extra capability on top of the `0.2.1-alpha.4` base: **choosing a fresh teammate's LLM route when the Team Lead creates an Agent Team**. Upstream does not provide it and a pull request is not planned, so read this as an extra build rather than an upstream contribution.
+
+### What the addition does
+
+Enable **Subagent model selection** under Plugins in Settings and add the exact `{ provider, model }` routes you authorize. A Lead Session composed after that records the route list, and the Lead's `spawn_teammate` gains `provider`, `model`, and `reasoning_effort` together with `list_subagent_models` for discovery. Omitting those fields keeps the original behavior: the teammate inherits the Lead's route.
+
+The route is checked against the Session allowlist and preflighted through the LLM runtime before the teammate exists, so an unauthorized, unregistered, or unsupported route fails without creating a member. Fork teammates keep no route selection, because their inherited conversation prefix belongs to the Lead's route.
+
+### Known limits
+
+`list_agents` reports a teammate's own model only while its Agent is loaded; once that Agent is released, the row omits `model` instead of reporting the Lead's. The exact route stays durable in the child Session descriptor and in the `spawn_teammate` result. The [tool-agent-team package README](packages/experimental/tool-agent-team/README.md) owns the complete contract.
+
+### Build this fork
+
+Run from a checkout as described under [Run from source](#run-from-source). The unsigned Windows desktop build is produced with `pnpm run package:desktop:win:x64:unsigned --build-version <version>` after filling in `apps/desktop/.env.windows`; the [packaging guide](apps/desktop/packaging/README.md) owns the requirements.
 
 ## Developer preview
 

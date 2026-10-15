@@ -1,4 +1,4 @@
-# DeepSeek Harness
+# DeepSeek Harness — teammate 模型选择 fork
 
 [English](README.md) | 中文
 
@@ -7,6 +7,24 @@ DeepSeek Harness（`dsh`）是由 [DeepSeek AI](https://deepseek.com) 开发的�
 它构建于**一切皆插件**的架构之上，由 [Cordis](https://github.com/cordiverse/cordis) 驱动，其设计参见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512)。
 
 文档：[https://deepseek-harness.github.io/deepseek-harness/](https://deepseek-harness.github.io/deepseek-harness/)
+
+## 本 fork
+
+本仓库是 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 的个人 fork，维护于 [namaenande/deepseek-harness](https://github.com/namaenande/deepseek-harness)。它跟随上游，并在 `0.2.1-alpha.4` 基线上额外提供一个能力：**Lead 创建 Agent Team 时可以为 fresh teammate 指定 LLM 路由**。上游没有该功能，也没有提 PR 的打算，因此请把它当作一个额外构建版，而不是上游贡献。
+
+### 这个增强做什么
+
+在「设置 → 插件」里启用 **Subagent model selection**，并加入你授权的精确 `{ provider, model }` 路由。此后新组合出的 Lead Session 会记录这份路由列表，Lead 的 `spawn_teammate` 随之获得 `provider`、`model`、`reasoning_effort` 三个参数，以及用于发现路由的 `list_subagent_models`。省略这些字段就是原来的行为：teammate 继承 Lead 的路由。
+
+路由会在 teammate 创建之前，先按 Session 白名单校验、再经 LLM 运行时预检，所以越权、未注册或不支持的路由都会在产生成员之前失败。fork teammate 不提供路由选择，因为继承来的对话前缀属于 Lead 的路由。
+
+### 已知限制
+
+`list_agents` 只在 teammate 的 Agent 加载期间报告它自己的模型；该 Agent 释放后，该行省略 `model`，而不是报成 Lead 的模型。精确路由仍然持久保存在子 Session 的 descriptor 以及 `spawn_teammate` 的返回值里。完整约定由 [tool-agent-team 包 README](packages/experimental/tool-agent-team/README.zh.md) 负责。
+
+### 构建本 fork
+
+按[从源码运行](#run-from-source)一节在检出中运行。未签名的 Windows 桌面版在填好 `apps/desktop/.env.windows` 后，用 `pnpm run package:desktop:win:x64:unsigned --build-version <版本>` 产出；环境要求在[打包指南](apps/desktop/packaging/README.zh.md)中。
 
 ## 开发者预览
 
