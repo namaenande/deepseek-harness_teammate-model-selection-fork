@@ -124,11 +124,13 @@ describe('list_subagent_models', () => {
     expect(text(result)).toContain('`llm` service is unavailable')
   })
 
-  it('rejects two discovery-owning instances in one tool scope', async () => {
+  it('keeps the first discovery owner when a second instance registers in one tool scope', async () => {
     const ctx = await setupListTool()
-    expect(() => {
-      registerListSubagentModels(ctx, { routes: [{ provider: 'alpha', model: 'fast' }] })
-    }).toThrow('tool "list_subagent_models" is already registered')
+    const first = ctx.tools.get('list_subagent_models')
+    const dispose = registerListSubagentModels(ctx, { routes: [{ provider: 'alpha', model: 'fast' }] })
+    expect(ctx.tools.get('list_subagent_models')).toBe(first)
+    dispose()
+    expect(ctx.tools.get('list_subagent_models')).toBe(first)
   })
 
   it('lists registered providers and follows live registration changes', async () => {

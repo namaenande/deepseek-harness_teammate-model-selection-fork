@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-This package lets the model create named teammates, send them messages, inspect availability, wait for progress, interrupt stuck work, and coordinate through a shared task board. Every team member receives the same nine tools and guidance for coordinating in a shared workspace. It replaces legacy subagent controls with the same tool names, so compositions that need both must disable the legacy definitions. The package is published under its experimental name and provides no stability guarantee.
+This package lets the model create named teammates, send them messages, inspect availability, wait for progress, interrupt stuck work, and coordinate through a shared task board. Every team member receives the same nine tools and guidance for coordinating in a shared workspace. It replaces legacy subagent controls with the same tool names, so compositions that need both must disable the legacy definitions. With the Host model-selection preference enabled, the Lead’s creation tool also selects a fresh teammate’s LLM route from the Session’s authorized routes. The package is published under its experimental name and provides no stability guarantee.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ This package lets the model create named teammates, send them messages, inspect 
 <a id="use-this-package"></a>
 ## Use this package
 
-Add this package on top of `@deepseek-ai/dsh-experimental-agent-team` when the model should run a team through tools. Once mounted, every team member — the Lead and each teammate — gets the same nine tools plus the same coordination policy. Each member receives its current role and name through required runtime context; `spawn_teammate` sends the initial task unchanged.
+Add this package on top of `@deepseek-ai/dsh-experimental-agent-team` when the model should run a team through tools. Once mounted, every team member — the Lead and each teammate — gets the same nine tools plus the same coordination policy; a Lead whose Session authorized child LLM routes also gets `list_subagent_models`. Each member receives its current role and name through required runtime context; `spawn_teammate` sends the initial task unchanged.
 
 ### When to choose it
 
@@ -63,6 +63,12 @@ The nine tools group into four capabilities:
 
 Creation and listing results identify members by `target`, with no member Session ID. Use that value in message and interrupt calls or the task tools’ `owner` parameter; task `ownerName` uses the same value. `inactive` means no turn is executing, whether the member is loaded or must be resumed; it does not describe task completion or outcome. `provisioning` and `failed` describe member creation. Any member can message any other member and use the task board; only the Lead creates and interrupts teammates. Task updates keep the domain's owner and revision checks, so an outdated edit is rejected instead of overwriting newer work.
 
+### Teammate LLM routes
+
+The Host owns whether a Session may select child LLM routes and which exact `{ provider, model }` routes it may select; the Team tool adds no authority of its own. Enable **Subagent model selection** in the Plugins settings and add at least one route. A Lead Session composed after that records the routes before its first request, and keeps them across resume.
+
+With a recorded route list, the Lead’s `spawn_teammate` accepts `provider`, `model`, and `reasoning_effort` and exposes `list_subagent_models` for discovery; without one, its schema stays fixed and those fields are rejected. Supply `provider` and `model` together; omitting them makes the teammate inherit the Lead’s route. The route is resolved and validated before the teammate exists, so an unregistered provider, an unsupported effort, or a route outside the list fails without creating a member. Fork teammates keep no route selection, because the inherited conversation prefix belongs to the Lead’s route. Teammates never select routes: only the Lead creates teammates.
+
 ### What success and failure look like
 
 `send_message` returns `{ "sent": true }` after inbox acceptance, without exposing the message ID. Success does not confirm recipient processing or a synchronous storage flush; send failures are reported as tool errors. `wait_agent` returns `noProgress` right away when no other member is running or provisioning, telling the caller to wake a teammate first; otherwise it waits for the next change and the caller re-reads state afterward. Task edits based on an outdated revision are rejected rather than overwriting newer work.
@@ -96,6 +102,8 @@ The [Agent Teams Agent Note](../../../.agents/notes/implemented/feature/2026-08-
 ### Policy and tools
 
 One `team:policy` section on the member scope states the shared coordination rules; the fixed text and the nine tool registrations are declared in [`src/index.ts`](src/index.ts). The nine tool schemas are registered in scopes recognized as Team members at publication. Scoped registrations with the same names as the legacy global continuable-subagent controls shadow those globals for team members only.
+
+Route selection reuses the owner of the user-facing authorization decision. `@deepseek-ai/dsh-tool-subagent/model-selection`, `.../model-selection-state`, and `.../list-models` supply route merging, adapter preflight, the durable per-Session policy, and the discovery tool; this package only decides which scope receives them. The route policy is resolved once per Agent, when its tools are installed, and only for a Lead.
 
 ### Scoped registration and teardown
 
@@ -134,6 +142,20 @@ Fixed policy and schema cost on every Team member request. Identity is part of t
 
 With the same provider/model, shared system policy, and tool schemas, a fork retains the parent request prefix and appends its task and current runtime context. Tool results and peer messages append after the reusable request prefix. Sessions recorded with identity inside the system prompt can change that prefix on their first request under this layout; actual provider cache hits remain best-effort.
 
+### Teammate LLM route selection
+
+#### What the model sees
+
+Only a Lead whose Session recorded an authorized route list sees the `provider`, `model`, and `reasoning_effort` parameters on `spawn_teammate`, the route wording in its description, and `list_subagent_models`. Every other scope keeps the fixed six-parameter creation schema and no discovery tool. Route selection changes the teammate’s own requests, never the Lead’s.
+
+#### Token effect
+
+Enabling route selection rewrites the Lead’s `spawn_teammate` description and adds three schema properties for the whole Session. `list_subagent_models` results enter the transcript only when the model calls it; the allowlist itself costs no tokens.
+
+#### KV Cache effect
+
+The Lead’s request prefix changes when the preference is enabled or the created schema changes, once per Session. A teammate created with a selected route differs from the Lead’s route, so its own requests no longer share the Lead’s provider-side prefix; a fork teammate keeps the Lead’s route and its inherited prefix.
+
 ## Known Limitations and Deferred Work
 
 <a id="known-limitations-and-deferred-work"></a>
@@ -142,6 +164,9 @@ These limits describe what the policy and tools cannot guarantee for a team. The
 
 - **Prompt policy is coordination, not confinement** — it cannot stop Bash or external processes from writing overlapping files.
 - **No Web controls** — browser roster and task-board presentation is outside this runtime package.
+- **Route selection needs the Host preference** — without it the Lead cannot choose teammate models at all, and an enabled preference reaches only Sessions composed after the change.
+- **`list_subagent_models` has one global name** — the Team tool registers it only when the scope has no other definition, so a composition that also mounts `@deepseek-ai/dsh-tool-subagent` with model selection enabled keeps that instance’s discovery tool.
+- **Roster model reporting needs the loaded child** — `list_agents` reports a teammate’s own route from its loaded Agent; once that Agent is released the row omits `model`, because the durable Team record stores no route and reporting the Lead’s would misrepresent a teammate that selected its own.
 - **Experimental prototype with no stability promise** — the package is public, but its schemas can change freely while it incubates.
 
 <a id="dev-note"></a>

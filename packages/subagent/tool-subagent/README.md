@@ -114,6 +114,8 @@ The tool's description derives from `provider.inheritsParentContext`: a fresh ch
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | Session event that records and inherits the sampled decision |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` runtime discovery tool |
 
+`model-selection`, `model-selection-state`, and `list-models` are published subpath exports. [`@deepseek-ai/dsh-experimental-tool-agent-team`](../../experimental/tool-agent-team/README.md) imports them so a Team Lead gets the same authorized route selection, adapter preflight, durable Session policy, and discovery tool for fresh teammates.
+
 </details>
 
 -----

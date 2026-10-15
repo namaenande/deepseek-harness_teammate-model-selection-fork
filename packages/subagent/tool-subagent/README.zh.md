@@ -114,6 +114,8 @@ kind: "package-reference"
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | 记录并继承已读取决定的 Session 事件 |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` 运行时发现工具 |
 
+`model-selection`、`model-selection-state` 与 `list-models` 是已发布的子路径导出。[`@deepseek-ai/dsh-experimental-tool-agent-team`](../../experimental/tool-agent-team/README.zh.md) 导入它们，使 Team Lead 为 fresh teammate 获得同样的授权路由选择、适配器预检、持久 Session 策略与发现工具。
+
 </details>
 
 -----

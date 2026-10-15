@@ -16,7 +16,7 @@ A newly composed top-level Session snapshots the route list in `subagent/model-s
 
 The fixed `list_subagent_models` schema does not enumerate the policy. At call time, provider and model listings are the intersection of the Session route list and the adapter's live advertised directory. An exact provider/model lookup first requires authorization, then resolves the adapter-owned model metadata and all advertised reasoning efforts. The delegation executor independently rejects any explicit provider, model, or effort selection whose effective provider/model route is outside the Session list before `resolveCallConfig()` validates adapter availability and effort support. A call that supplies no selection field retains configured or inherited routing because the model made no route choice.
 
-Model selection has no unrestricted static mode. The default-off Host setting is the only authority, and an enabled Session always carries an exact allowlist. The primary spawn tool reads that setting; the shipped fork tool still exposes no route selection so inherited conversation prefixes remain eligible for provider-side KV Cache reuse.
+Model selection has no unrestricted static mode. The default-off Host setting is the only authority, and an enabled Session always carries an exact allowlist. The primary spawn tool reads that setting; the Agent Teams Lead's creation tool reads the same setting and the same recorded list, so a fresh teammate can be given an authorized route. Fork delegation exposes no route selection in either tool, keeping inherited conversation prefixes eligible for provider-side KV Cache reuse.
 
 ## Alternatives considered
 
@@ -35,6 +35,7 @@ Model selection has no unrestricted static mode. The default-off Host setting is
 - New adapter registrations and newly advertised models do not expand user authorization.
 - Adapter removals or catalog failures can reduce what discovery currently lists without deleting the saved route decision; an exact authorized route remains usable when its adapter accepts it even if the advisory catalog omits it.
 - The allowlist itself consumes no parent-request tokens. Only a `list_subagent_models` result enters the transcript.
+- The Agent Teams Lead consumes this decision through the same modules and records the same per-Session policy, so teammate creation adds no second authorization source.
 - The policy event is log-only and is appended while an Agent is composed, before either SDK begins its run subscription. Shipped SDK profiles do not enable this Web-owned preference, so the event changes neither SDK's expected notifications or persisted-session output; package restore tests own its durable projection instead of fabricating an SDK composition solely to emit it.
 - Unit coverage pins settings validation, malformed durable values, Session sampling and inheritance, discovery intersection, executor denial, live UI catalog invalidation, staged-route retention, connection-generation invalidation, staged whole-array writes, stale-revision rejection, and retry after scoped installation failure. The assembled Web scenario pins the real settings document and Plugins card flow.
 

@@ -16,7 +16,7 @@ Host 自有的 `subagent-model-selection` 设置 section 保存显式 `enabled` 
 
 固定的 `list_subagent_models` schema 不会枚举该策略。调用时，提供方和模型列表是 Session 路由列表与适配器实时公布目录的交集。精确 provider/model 查询先要求授权，再解析适配器自有的模型元数据和全部已公布推理强度。委派执行器还会独立拒绝任何生效 provider/model 路由不在 Session 列表内的显式提供方、模型或强度选择，然后才由 `resolveCallConfig()` 校验适配器可用性与强度支持。完全没有选择字段的调用保留配置或继承路由，因为模型没有作出路由选择。
 
-模型选择不再有无限制的静态模式。默认关闭的 Host 设置是唯一授权来源，启用的 Session 始终携带精确允许列表。主 spawn 工具读取该设置；随附 fork 工具仍不公开路由选择，使继承的对话前缀继续符合提供方侧 KV Cache 复用条件。
+模型选择不再有无限制的静态模式。默认关闭的 Host 设置是唯一授权来源，启用的 Session 始终携带精确允许列表。主 spawn 工具读取该设置；Agent Teams 的 Lead 创建工具读取同一设置与同一份已记录列表，因此可以为 fresh teammate 指定获授权路由。两种工具的 fork 委派都不公开路由选择，使继承的对话前缀继续符合提供方侧 KV Cache 复用条件。
 
 ## Alternatives considered
 
@@ -35,6 +35,7 @@ Host 自有的 `subagent-model-selection` 设置 section 保存显式 `enabled` 
 - 新适配器注册和新公布模型不会扩大用户授权。
 - 适配器移除或目录失败可以减少发现当前列出的内容，但不会删除已存路由决定；即使建议性目录省略某条精确已授权路由，只要适配器接受它，该路由仍然可用。
 - 允许列表本身不消耗父级请求 token。只有 `list_subagent_models` 结果进入 transcript。
+- Agent Teams 的 Lead 通过同一组模块消费该决定，并记录同样的按 Session 策略，因此 teammate 创建不会引入第二个授权来源。
 - 策略事件仅存在于日志，并在 Agent 组合期间、两套 SDK 开始订阅运行前追加。随附 SDK profile 不启用这项 Web 自有偏好，因此该事件不会改变任一 SDK 的预期通知或持久 Session 输出；其持久投影由包级恢复测试负责，不会为了发出该事件而虚构 SDK 组合。
 - 单元覆盖固定设置校验、异常持久值、Session 取样与继承、发现交集、执行器拒绝、UI 实时目录失效、暂存路由保留、连接换代失效、暂存后的整数组写入、陈旧 revision 拒绝，以及作用域安装失败后的重试。组装 Web 场景固定真实设置文档与 Plugins 设置卡流程。
 

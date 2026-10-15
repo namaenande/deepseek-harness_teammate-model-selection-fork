@@ -3,15 +3,27 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { parentAgentOptionsForDelegation } from '@deepseek-ai/dsh-subagent'
 import { TeamTaskId } from '@deepseek-ai/dsh-experimental-agent-team'
 import type { TeamMemberView } from '@deepseek-ai/dsh-experimental-agent-team'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { InferValue, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
+import {
+  assertAllowedModelSelection,
+  hasDelegationModelRequest,
+  preflightChildLlmRoute,
+  requestedAgentOptions,
+} from '@deepseek-ai/dsh-tool-subagent/model-selection'
+import type { DelegationModelRequest, ModelSelectionPolicy } from '@deepseek-ai/dsh-tool-subagent/model-selection'
+import { resolveModelSelectionPolicy, subagentModelSelectionProjectionDefinition } from '@deepseek-ai/dsh-tool-subagent/model-selection-state'
+import { registerListSubagentModels } from '@deepseek-ai/dsh-tool-subagent/list-models'
+import type {} from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
 
 /** Cordis plugin name. */
 export const name = 'tool-agent-team'
 /** Services required by the Team tool plugin. */
-export const inject = ['agents', 'agentTeams', 'tools', 'systemPrompt']
+export const inject = ['agents', 'agentTeams', 'tools', 'systemPrompt', 'sessionProjections']
 
 /** Tool routing configuration. */
 export interface Config {
@@ -164,8 +176,20 @@ function callingAgent(agent: Agent | undefined, toolName: string): Agent {
   return agent
 }
 
-/** Register the complete Team tool set in one exact Agent scope. */
-function install(agent: Agent, ctx: Context, config: Required<Config>): () => void {
+/**
+ * Register the complete Team tool set in one exact Agent scope.
+ * @param agent - exact live Team member receiving the definitions.
+ * @param ctx - Team tool plugin Context.
+ * @param config - resolved tool routing configuration.
+ * @param policy - Host-authorized teammate LLM routes, or undefined for the fixed-route Lead.
+ * @returns the disposer that removes every definition installed here.
+ */
+function install(
+  agent: Agent,
+  ctx: Context,
+  config: Required<Config>,
+  policy: ModelSelectionPolicy | undefined,
+): () => void {
   const scoped = agent.ctx
   const disposers: Array<() => unknown> = []
   const register = (disposer: () => unknown): void => { disposers.push(disposer) }
@@ -191,7 +215,10 @@ To message another teammate, use send_message({ target: "<teammate name>", messa
 
     register(scoped.tools.register(defineTool({
       name: 'spawn_teammate',
-      description: 'Create one named, durable teammate. Only the Team Lead may call this tool.',
+      description: 'Create one named, durable teammate. Only the Team Lead may call this tool.'
+        + (policy === undefined
+          ? ''
+          : ' The teammate inherits your LLM route unless you select one: supply `provider` and `model` together after using `list_subagent_models` to inspect the routes this Session is allowed to select, and use `reasoning_effort` for an adapter-owned effort. Route selection requires fresh context.'),
       parameters: {
         name: { type: 'string', required: true, description: 'Unique lower-kebab-case teammate name.' },
         description: { type: 'string', required: true, description: 'Short description of the delegated responsibility.' },
@@ -201,22 +228,57 @@ To message another teammate, use send_message({ target: "<teammate name>", messa
           enum: ['fresh', 'fork'],
           description: 'fresh starts without Lead history; fork inherits completed Lead turns. Defaults to fresh.',
         },
+        ...policy === undefined ? {} : {
+          provider: {
+            type: 'string' as const,
+            description: 'LLM provider route for the teammate. Supply together with model; omit both to inherit your route.',
+          },
+          model: {
+            type: 'string' as const,
+            description: 'Model id interpreted by provider. Supply together with provider; omit both to inherit your route.',
+          },
+          reasoning_effort: {
+            type: 'string' as const,
+            description: 'Adapter-owned reasoning effort for the effective teammate route. Omit to inherit a compatible Lead effort or use the selected model\'s default.',
+          },
+        },
       },
       output: jsonOutput(SPAWN_VALUE_SCHEMA),
       async execute(args, exec) {
         const agent = callingAgent(exec.agent, 'spawn_teammate')
         const context = args.context ?? 'fresh'
+        const modelRequest = args as DelegationModelRequest
+        if (context === 'fork' && hasDelegationModelRequest(modelRequest)) {
+          throw new Error('a fork teammate cannot select its own LLM route because the inherited conversation prefix belongs to your route; create the teammate with fresh context instead')
+        }
+        const parentOptions = parentAgentOptionsForDelegation(agent)
+        const requested = requestedAgentOptions(parentOptions, undefined, modelRequest, policy !== undefined)
+        assertAllowedModelSelection(policy, parentOptions, requested, modelRequest)
+        if (requested !== undefined) {
+          const llm = ctx.get('llm')
+          if (llm === undefined) {
+            throw new Error('cannot select the teammate LLM route because the `llm` service is unavailable')
+          }
+          await preflightChildLlmRoute(llm, parentOptions, requested, exec.signal)
+        }
         const result = await ctx.agentTeams.spawnTeammate(agent, {
           name: args.name,
           description: args.description,
           prompt: [{ type: 'text', text: args.prompt }],
           context,
           provider: context === 'fork' ? config.forkProvider : config.freshProvider,
+          ...requested === undefined ? {} : { agentOptions: requested },
           signal: exec.signal,
         })
         return { member: modelMember(result.member) }
       },
     })))
+
+    // The shared registration reuses an equivalent definition another
+    // delegation surface already owns in this scope, in either activation order.
+    if (policy !== undefined) {
+      register(registerListSubagentModels(scoped, policy))
+    }
 
     register(scoped.tools.register(defineTool({
       name: 'send_message',
@@ -414,10 +476,20 @@ export function apply(ctx: Context, config: Config = {}): void {
     freshProvider: config.freshProvider ?? 'spawn',
     forkProvider: config.forkProvider ?? 'fork',
   }
+  // Registered before any definition is installed so a resumed Session reads its
+  // durable route decision even when the Host preference is currently disabled.
+  ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
+  const settings = ctx.get('subagentModelSelection')
   const installed = new Map<Agent, () => void>()
   const maybeInstall = (agent: Agent): void => {
-    if (installed.has(agent) || ctx.agentTeams.tryMembership(agent) === undefined) return
-    installed.set(agent, install(agent, ctx, resolved))
+    const membership = ctx.agentTeams.tryMembership(agent)
+    if (membership === undefined || installed.has(agent)) return
+    // Only the Lead creates teammates, so only the Lead's definition is
+    // model-selectable; teammates keep the fixed inherited route.
+    const policy = membership.role === 'lead'
+      ? resolveModelSelectionPolicy(ctx, settings, agent.session)
+      : undefined
+    installed.set(agent, install(agent, ctx, resolved, policy))
   }
   for (const agent of ctx.agents.list()) maybeInstall(agent)
   ctx.on('agent/created', ({ agent }) => { maybeInstall(agent) })

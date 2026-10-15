@@ -4,16 +4,23 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import SessionStore, { Session, SessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 import SubagentService from '@deepseek-ai/dsh-subagent'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
+import SubagentModelSelectionConfig from '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+import { registerListSubagentModels } from '@deepseek-ai/dsh-tool-subagent/list-models'
+import type { AllowedModelRoute } from '@deepseek-ai/dsh-tool-subagent/model-selection'
 import { renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 import * as ToolSubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
@@ -69,7 +76,12 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-async function setup(script: ConstructorParameters<typeof MockAdapter>[0], legacyControl = false) {
+async function setup(
+  script: ConstructorParameters<typeof MockAdapter>[0],
+  legacyControl = false,
+  selection?: { enabled: boolean; allowedModels: AllowedModelRoute[] },
+  reasoning?: ConstructorParameters<typeof MockAdapter>[1],
+) {
   const ctx = new Context()
   contexts.add(ctx)
   await mountAgentLoopTestDependencies(ctx)
@@ -84,8 +96,9 @@ async function setup(script: ConstructorParameters<typeof MockAdapter>[0], legac
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   await ctx.plugin(SubagentFork, { providerName: 'fork' })
   await ctx.plugin(TeamService)
+  if (selection !== undefined) await ctx.plugin(SubagentModelSelectionConfig, selection)
   const fiber = await ctx.plugin(toolTeam)
-  const adapter = new MockAdapter(script)
+  const adapter = new MockAdapter(script, reasoning)
   ctx.llm.registerAdapter(['mock'], adapter)
   const lead = await ctx.agentLoop.create(SessionId('tool-team-lead'), { provider: 'mock', model: 'mock' })
   return { ctx, lead, fiber, adapter }
@@ -762,7 +775,7 @@ describe('dsh-tool-team', () => {
     expect(text(result)).toContain('unknown tool "list_agents"')
     expect('default' in toolTeam).toBe(false)
     expect(toolTeam.name).toBe('tool-agent-team')
-    expect(toolTeam.inject).toEqual(['agents', 'agentTeams', 'tools', 'systemPrompt'])
+    expect(toolTeam.inject).toEqual(['agents', 'agentTeams', 'tools', 'systemPrompt', 'sessionProjections'])
   })
 
   it('uses configured fresh and fork provider names', async () => {
@@ -777,5 +790,294 @@ describe('dsh-tool-team', () => {
     const childId = spawnedChildId(ctx, lead, result)
     await vi.waitFor(() => { expect(ctx.agents.get(childId)).toBeUndefined() }, { timeout: 5_000 })
     expect(ctx.agentTeams.listMembers(lead)[1]).toMatchObject({ provider: 'team-fresh' })
+  })
+})
+
+const TEAM_ALLOWED_ROUTES: AllowedModelRoute[] = [
+  { provider: 'mock', model: 'strong-model' },
+  { provider: 'ghost', model: 'ghost-model' },
+]
+
+const TEAM_REASONING = {
+  efforts: [
+    { id: ReasoningEffortId('low'), name: 'Low' },
+    { id: ReasoningEffortId('high'), name: 'High' },
+  ],
+  defaultEffort: ReasoningEffortId('high'),
+} as const
+
+/** Parameters the model sees for one tool in one scope. */
+function visibleParameters(ctx: Context, scope: Agent, name: string): string[] {
+  const schema = ctx.tools.schemas(scope).find(entry => entry.name === name)
+  const properties = (schema?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}
+  return Object.keys(properties).sort()
+}
+
+async function setupWithRoutes(
+  script: ConstructorParameters<typeof MockAdapter>[0],
+  allowedModels: AllowedModelRoute[] = TEAM_ALLOWED_ROUTES,
+  reasoning?: ConstructorParameters<typeof MockAdapter>[1],
+) {
+  return await setup(script, false, { enabled: true, allowedModels }, reasoning)
+}
+
+describe('dsh-tool-team teammate LLM routes', () => {
+  it('offers authorized route fields and discovery to the Lead only', async () => {
+    const { ctx, lead } = await setupWithRoutes(['hang'])
+    expect(visibleParameters(ctx, lead, 'spawn_teammate'))
+      .toEqual(['context', 'description', 'model', 'name', 'prompt', 'provider', 'reasoning_effort'])
+    expect(ctx.tools.get('spawn_teammate', lead)?.description).toContain('list_subagent_models')
+    expect(ctx.tools.get('list_subagent_models', lead)).toBeDefined()
+    // The Session carries its durable route decision before any definition reaches a request.
+    expect(lead.session.snapshotEvents().some(event => event.type === 'subagent/model-selection-policy')).toBe(true)
+
+    const spawned = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'router', description: 'route work', prompt: 'wait',
+    })
+    expect(spawned.isError, text(spawned)).toBe(false)
+    const childId = spawnedChildId(ctx, lead, spawned)
+    const child = await waitRunning(ctx, childId)
+    // Only the Lead creates teammates, so a teammate keeps the fixed inherited route.
+    expect(visibleParameters(ctx, child, 'spawn_teammate'))
+      .toEqual(['context', 'description', 'name', 'prompt'])
+    expect(ctx.tools.get('list_subagent_models', child)).toBeUndefined()
+    await execute(ctx, lead, 'interrupt_agent', { target: 'router' })
+    await waitNoAgent(ctx, childId)
+  })
+
+  it('applies a selected route to a fresh teammate and reports it in the roster', async () => {
+    const { ctx, lead } = await setupWithRoutes(['hang'])
+    const spawned = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'router', description: 'route work', prompt: 'wait',
+      provider: 'mock', model: 'strong-model',
+    })
+    expect(spawned.isError, text(spawned)).toBe(false)
+    const childId = spawnedChildId(ctx, lead, spawned)
+    const child = await waitRunning(ctx, childId)
+    expect(child.options.model).toBe('strong-model')
+    const listed = JSON.parse(text(await execute(ctx, lead, 'list_agents', {}))) as Array<{ target: string; model?: string }>
+    expect(listed.find(member => member.target === 'router')?.model).toBe('strong-model')
+    await execute(ctx, lead, 'interrupt_agent', { target: 'router' })
+    await waitNoAgent(ctx, childId)
+  })
+
+  it('records the selected route in the durable child descriptor for cold resume', async () => {
+    const { ctx, lead } = await setupWithRoutes([textResponse('child answer')])
+    const spawned = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'durable-router', description: 'route work', prompt: 'finish',
+      provider: 'mock', model: 'strong-model',
+    })
+    expect(spawned.isError, text(spawned)).toBe(false)
+    const childId = spawnedChildId(ctx, lead, spawned)
+    await waitNoAgent(ctx, childId)
+    await using persisted = await ctx.sessionPersistence.open(childId, 'read')
+    const { events } = await persisted.read()
+    const descriptor = events.find(event => event.type === 'subagent/descriptor')
+    expect(descriptor?.type === 'subagent/descriptor' ? descriptor.data : undefined)
+      .toMatchObject({ agentProvider: 'mock', agentModel: 'strong-model' })
+  })
+
+  it('inherits the Lead route when the call selects nothing', async () => {
+    const { ctx, lead } = await setupWithRoutes(['hang'])
+    const spawned = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'inheritor', description: 'inherit route', prompt: 'wait',
+    })
+    expect(spawned.isError, text(spawned)).toBe(false)
+    const childId = spawnedChildId(ctx, lead, spawned)
+    const child = await waitRunning(ctx, childId)
+    expect(child.options).toMatchObject({ provider: 'mock', model: 'mock' })
+    await execute(ctx, lead, 'interrupt_agent', { target: 'inheritor' })
+    await waitNoAgent(ctx, childId)
+  })
+
+  it('rejects a route outside the Session allowlist and an unavailable provider', async () => {
+    const { ctx, lead } = await setupWithRoutes([])
+    const denied = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'denied', description: 'denied route', prompt: 'go',
+      provider: 'mock', model: 'unlisted-model',
+    })
+    expect(denied.isError).toBe(true)
+    expect(text(denied)).toContain('child LLM route "mock/unlisted-model" is not allowed for this Session')
+
+    const unavailable = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'unavailable', description: 'unavailable route', prompt: 'go',
+      provider: 'ghost', model: 'ghost-model',
+    })
+    expect(unavailable.isError).toBe(true)
+    expect(text(unavailable)).toContain('no adapter registered for provider "ghost"')
+
+    expect(ctx.agentTeams.listMembers(lead)).toHaveLength(1)
+  })
+
+  it.each([
+    [{ provider: 'mock' }, '`provider` and `model` must be supplied together'],
+    [{ model: 'strong-model' }, '`provider` and `model` must be supplied together'],
+    [{ provider: '', model: 'strong-model' }, '`provider` must be non-empty'],
+    [{ provider: 'mock', model: '' }, '`model` must be non-empty'],
+    // An effort-only selection still resolves to the Lead's route, which must be authorized.
+    [{ reasoning_effort: 'low' }, 'child LLM route "mock/mock" is not allowed for this Session'],
+  ])('rejects an unauthorized or incomplete route selection %o', async (selection, message) => {
+    const { ctx, lead } = await setupWithRoutes([])
+    const result = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'partial', description: 'partial route', prompt: 'go', ...selection,
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain(message)
+    expect(ctx.agentTeams.listMembers(lead)).toHaveLength(1)
+  })
+
+  it('applies an adapter-owned reasoning effort and records it durably', async () => {
+    const { ctx, lead } = await setupWithRoutes(
+      [textResponse('child answer')],
+      [{ provider: 'mock', model: 'strong-model' }],
+      TEAM_REASONING,
+    )
+    const spawned = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'effort-router', description: 'effort route', prompt: 'finish',
+      provider: 'mock', model: 'strong-model', reasoning_effort: 'low',
+    })
+    expect(spawned.isError, text(spawned)).toBe(false)
+    const childId = spawnedChildId(ctx, lead, spawned)
+    await waitNoAgent(ctx, childId)
+    await using persisted = await ctx.sessionPersistence.open(childId, 'read')
+    const { events } = await persisted.read()
+    const descriptor = events.find(event => event.type === 'subagent/descriptor')
+    expect(descriptor?.type === 'subagent/descriptor' ? descriptor.data : undefined)
+      .toMatchObject({ agentProvider: 'mock', agentModel: 'strong-model', agentReasoningEffort: 'low' })
+  })
+
+  it('validates an unsupported reasoning effort before creating the teammate', async () => {
+    const { ctx, lead } = await setupWithRoutes([])
+    const result = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'unsupported-effort', description: 'bad effort', prompt: 'go',
+      provider: 'mock', model: 'strong-model', reasoning_effort: 'low',
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('does not support reasoning effort "low"')
+    expect(ctx.agentTeams.listMembers(lead)).toHaveLength(1)
+  })
+
+  it('rejects route selection for a fork teammate', async () => {
+    const { ctx, lead } = await setupWithRoutes([])
+    const result = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'forked', description: 'forked route', prompt: 'go', context: 'fork',
+      provider: 'mock', model: 'strong-model',
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('a fork teammate cannot select its own LLM route')
+    expect(ctx.agentTeams.listMembers(lead)).toHaveLength(1)
+  })
+
+  it('keeps the fixed definition and rejects route fields without the Host preference', async () => {
+    const { ctx, lead } = await setup([])
+    expect(visibleParameters(ctx, lead, 'spawn_teammate'))
+      .toEqual(['context', 'description', 'name', 'prompt'])
+    expect(ctx.tools.get('list_subagent_models')).toBeUndefined()
+    expect(lead.session.snapshotEvents().some(event => event.type === 'subagent/model-selection-policy')).toBe(false)
+
+    const result = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'forced', description: 'forced route', prompt: 'go',
+      provider: 'mock', model: 'strong-model',
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('child model selection is disabled for this tool instance')
+    expect(ctx.agentTeams.listMembers(lead)).toHaveLength(1)
+  })
+
+  it('discovers only the providers this Session may select', async () => {
+    const { ctx, lead } = await setupWithRoutes([])
+    ctx.llm.registerAdapter(['other-provider'], new MockAdapter([]))
+    const listed = await execute(ctx, lead, 'list_subagent_models', {})
+    expect(listed.isError, text(listed)).toBe(false)
+    expect(text(listed)).toContain('mock')
+    expect(text(listed)).not.toContain('other-provider')
+  })
+
+  it('reuses a discovery tool another delegation surface already registered', async () => {
+    const { ctx, lead, fiber } = await setupWithRoutes([])
+    await fiber.dispose()
+    const preset = defineContentToolFixture({
+      name: 'list_subagent_models',
+      description: 'preset-owned discovery',
+      parameters: {},
+      async execute() { return [{ type: 'text', text: 'preset discovery result' }] },
+    })
+    const disposePreset = lead.ctx.tools.register(preset)
+
+    const replacement = await ctx.plugin(toolTeam)
+
+    expect(visibleParameters(ctx, lead, 'spawn_teammate'))
+      .toEqual(['context', 'description', 'model', 'name', 'prompt', 'provider', 'reasoning_effort'])
+    expect(ctx.tools.get('list_subagent_models', lead)).toBe(preset)
+    expect(text(await execute(ctx, lead, 'list_subagent_models', {}))).toContain('preset discovery result')
+    await replacement.dispose()
+    disposePreset()
+  })
+
+  it('tolerates another delegation surface registering discovery afterwards', async () => {
+    const { ctx, lead } = await setupWithRoutes([])
+    const mine = ctx.tools.get('list_subagent_models', lead)
+    expect(mine).toBeDefined()
+    // A preset-composed tool-subagent activates its injected fiber after
+    // agent/created, so it registers second and must reuse this definition.
+    const dispose = registerListSubagentModels(lead.ctx, {
+      routes: [{ provider: 'mock', model: 'strong-model' }],
+    })
+    expect(ctx.tools.get('list_subagent_models', lead)).toBe(mine)
+    dispose()
+    expect(ctx.tools.get('list_subagent_models', lead)).toBe(mine)
+  })
+
+  it('omits a released teammate route instead of reporting the Lead route', async () => {
+    const { ctx, lead } = await setupWithRoutes([textResponse('child answer')])
+    const spawned = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'settled-router', description: 'route work', prompt: 'finish',
+      provider: 'mock', model: 'strong-model',
+    })
+    expect(spawned.isError, text(spawned)).toBe(false)
+    const childId = spawnedChildId(ctx, lead, spawned)
+    await waitNoAgent(ctx, childId)
+    const listed = JSON.parse(text(await execute(ctx, lead, 'list_agents', {}))) as
+      Array<{ target: string; model?: string }>
+    // The Lead runs on `mock`; reporting that for a teammate that selected
+    // `strong-model` would be wrong, so the released row carries no model.
+    expect(listed.find(member => member.target === 'settled-router')).not.toHaveProperty('model')
+    expect(listed.find(member => member.target === 'lead')?.model).toBe('mock')
+  })
+
+  it('rejects a selected route when the composition provides no LLM service', async () => {
+    const ctx = new Context()
+    contexts.add(ctx)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    const storageRoot = mkdtempSync(join(tmpdir(), 'dsh-tool-team-no-llm-'))
+    roots.push(storageRoot)
+    await ctx.plugin(JsonlSessionPersistence, { root: storageRoot })
+    await mountWorkingDirectoryFixture(ctx)
+    await ctx.plugin(SubagentService)
+    await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
+    await ctx.plugin(SubagentFork, { providerName: 'fork' })
+    await ctx.plugin(TeamService)
+    await ctx.plugin(SubagentModelSelectionConfig, {
+      enabled: true,
+      allowedModels: [{ provider: 'mock', model: 'strong-model' }],
+    })
+    await ctx.plugin(toolTeam)
+    const session = Session.create(SessionId('tool-team-without-llm'))
+    const lead = {
+      id: session.id, session, status: 'idle', options: { provider: 'mock', model: 'mock' }, ctx,
+    } as Agent
+    await ctx.agents.register(lead)
+
+    const result = await execute(ctx, lead, 'spawn_teammate', {
+      name: 'no-llm-router', description: 'no llm route', prompt: 'go',
+      provider: 'mock', model: 'strong-model',
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('`llm` service is unavailable')
+    expect(ctx.agents.get(lead.id)).toBe(lead)
   })
 })

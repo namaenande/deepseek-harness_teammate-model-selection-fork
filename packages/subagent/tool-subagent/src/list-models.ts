@@ -3,6 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type LlmRuntime from '@deepseek-ai/dsh-llm'
 import type { LlmProviderInfo } from '@deepseek-ai/dsh-llm'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ModelSelectionPolicy } from './model-selection.ts'
 
@@ -79,12 +80,19 @@ async function listSubagentModels(
 }
 
 /**
- * Register `list_subagent_models` for one owning delegation-tool instance.
+ * Register `list_subagent_models` for one owning delegation-tool instance. The
+ * name is global to its scope and two delegation surfaces can coexist there
+ * (the shipped Agent Presets compose one beside the Team tools), activating in
+ * either order. Every owner answers for the same Session policy, so a later
+ * registrant reuses the definition already present instead of failing the
+ * whole Agent scope.
  * @param ctx - Context whose tool registry owns the fixed discovery definition.
  * @param policy - Route policy captured for this Session.
+ * @returns the disposer that removes the discovery definition, or a no-op when another owner holds it.
  */
-export function registerListSubagentModels(ctx: Context, policy: ModelSelectionPolicy): void {
-  ctx.tools.register(defineTool({
+export function registerListSubagentModels(ctx: Context, policy: ModelSelectionPolicy): () => void {
+  if (ctx.tools.get('list_subagent_models', scopeOf(ctx)) !== undefined) return () => {}
+  return ctx.tools.register(defineTool({
     name: 'list_subagent_models',
     description:
       'Discover LLM routes for subagents without changing the current Agent. Call with no arguments to list '

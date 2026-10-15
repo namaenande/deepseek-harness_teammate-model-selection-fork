@@ -1,6 +1,6 @@
 /** Public Agent Teams identities, durable records, and service request values. */
 
-import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
+import type { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm/brand'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -161,6 +161,23 @@ export interface Config {
   readonly disposalTimeoutMs?: number
 }
 
+/**
+ * Child route overrides accepted from the calling tool. The Team service
+ * forwards them to the subagent seam as that seam's `agentOptions`, so the
+ * fields mirror it; they are restated here because this client-safe module
+ * cannot import the host agent runtime.
+ */
+export interface SpawnTeammateAgentOptions {
+  /** Provider route for the teammate. */
+  readonly provider?: string
+  /** Model id interpreted by the selected provider adapter. */
+  readonly model?: string
+  /** Adapter-owned reasoning effort for the selected route. */
+  readonly reasoningEffort?: ReasoningEffortId
+  /** Maximum output tokens for each teammate request. */
+  readonly maxTokens?: number
+}
+
 /** Input for creating one durable teammate. */
 export interface SpawnTeammateRequest {
   readonly name: string
@@ -168,6 +185,11 @@ export interface SpawnTeammateRequest {
   readonly prompt: ContentBlock[]
   readonly context: 'fresh' | 'fork'
   readonly provider: string
+  /**
+   * Route overrides already authorized by the calling tool. Omission makes the
+   * child inherit the Lead's route.
+   */
+  readonly agentOptions?: SpawnTeammateAgentOptions
   readonly signal: AbortSignal
 }
 
